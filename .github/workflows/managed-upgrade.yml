@@ -1,0 +1,98 @@
+name: managed-upgrade-proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_ref:
+        description: PR branch in SunnyShu0925/openclaw
+        required: true
+        default: fix/managed-service-handoff-control-deadline-monotonic-164
+      stable_version:
+        description: Published driver version to upgrade from
+        required: true
+        default: "2026.10.8"
+      candidate_version:
+        description: Candidate version built from the PR head
+        required: true
+        default: "2026.10.9"
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout proof harness
+        uses: actions/checkout@v4
+
+      - name: Checkout reviewed PR head
+        uses: actions/checkout@v4
+        with:
+          repository: SunnyShu0925/openclaw
+          ref: ${{ inputs.pr_ref }}
+          path: openclaw
+          fetch-depth: 1
+
+      - name: Report head identity
+        run: |
+          git -C openclaw rev-parse HEAD
+          git -C openclaw log -1 --format='%H %s'
+
+      - name: Setup Node 24.22.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+
+      - name: Enable pnpm and start the systemd user manager
+        run: |
+          corepack enable
+          (cd openclaw && corepack install)
+          (cd openclaw && pnpm --version)
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+          echo "npm_config_prefix=$HOME/.npm-global" >> "$GITHUB_ENV"
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          systemctl --user is-system-running || true
+          systemctl --user start dbus.socket 2>/dev/null || true
+          systemctl --user is-active dbus.socket 2>/dev/null || true
+
+      - name: Install workspace dependencies
+        working-directory: openclaw
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the CLI/dist from the reviewed head
+        working-directory: openclaw
+        run: pnpm build cliStartup
+        continue-on-error: true
+
+      - name: Assert the sealed dist entry exists
+        working-directory: openclaw
+        run: |
+          ls -l dist/entry.js dist/managed-handoff-runtime.mjs
+          grep -o 'scheduleAbsoluteDeadline(performance.now() + timeoutMs[^;]*' dist/update-managed-service-handoff-current-*.mjs
+
+      - name: Run the published-driver to candidate managed upgrade
+        working-directory: openclaw
+        env:
+          STABLE_VERSION: ${{ inputs.stable_version }}
+          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+        run: bash "$GITHUB_WORKSPACE/scripts/proof.sh"
+
+      - name: Upload proof logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-logs
+          path: |
+            /tmp/update.json
+            /tmp/update.err
+            /tmp/registry.log
+            /tmp/cron-before.json
+            /tmp/cron-after.json
+            /tmp/gateway-status.json
+            /tmp/proof-summary.txt
+          if-no-files-found: warn
