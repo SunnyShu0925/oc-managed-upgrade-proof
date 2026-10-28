@@ -29,20 +29,26 @@ npm install -g "openclaw@$STABLE" --no-audit --no-fund 2>&1 | tail -5
 PUBLISHED_BIN="$HOME/.npm-global/bin/openclaw"
 "$PUBLISHED_BIN" --version | tee -a "$SUMMARY"
 
-say "pack reviewed candidate $CANDIDATE from this head"
-mkdir -p "$RUNNER_TEMP/pkg"
-MANIFEST="$RUNNER_TEMP/pkg/candidate-manifest.json"
-CANDIDATE_VERSION="$CANDIDATE" MANIFEST="$MANIFEST" node -e '
-const fs = require("node:fs");
-const manifest = JSON.parse(fs.readFileSync("package.json", "utf8"));
-manifest.version = process.env.CANDIDATE_VERSION;
-fs.writeFileSync(process.env.MANIFEST, JSON.stringify(manifest, null, 2));
-fs.writeFileSync("package.json", JSON.stringify(manifest, null, 2) + "\n");
+say "pack reviewed candidate $CANDIDATE from this head (canonical packer)"
+mkdir -p "$RUNNER_TEMP/pkg" "$RUNNER_TEMP/relabel"
+node scripts/package-openclaw-for-docker.mjs --skip-build --allow-unreleased-changelog \
+  --output-dir "$RUNNER_TEMP/pkg" --output-name openclaw-candidate.tgz 2>&1 | tail -4
+PACKED="$RUNNER_TEMP/pkg/openclaw-candidate.tgz"
+tar -xf "$PACKED" -C "$RUNNER_TEMP/relabel"
+CANDIDATE_VERSION="$CANDIDATE" RELABEL="$RUNNER_TEMP/relabel/package" node --input-type=module -e '
+import { stampFixtureVersion } from "./scripts/e2e/lib/update-first-hop-package-fixtures.mjs";
+stampFixtureVersion(process.env.RELABEL, process.env.CANDIDATE_VERSION);
 '
-npm pack --pack-destination "$RUNNER_TEMP/pkg" 2>&1 | tail -3
-TARBALL="$(ls "$RUNNER_TEMP/pkg"/openclaw-*.tgz | head -1)"
-git checkout -- package.json
-note "candidate tarball: $TARBALL ($(stat -c%s "$TARBALL") bytes)"
+TARBALL="$RUNNER_TEMP/pkg/openclaw-candidate-$CANDIDATE.tgz"
+tar -czf "$TARBALL" -C "$RUNNER_TEMP/relabel" package
+MANIFEST="$RUNNER_TEMP/pkg/candidate-manifest.json"
+node -e '
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+manifest.version = process.argv[2];
+fs.writeFileSync(process.argv[3], JSON.stringify(manifest, null, 2));
+' "$RUNNER_TEMP/relabel/package/package.json" "$CANDIDATE" "$MANIFEST"
+note "candidate tarball: $TARBALL ($(stat -c%s "$TARBALL") bytes) version=$CANDIDATE"
 tar -xzOf "$TARBALL" package/dist/update-managed-service-handoff-current-*.mjs \
   | grep -o 'scheduleAbsoluteDeadline(performance.now() + timeoutMs[^;]*' | head -1 | tee -a "$SUMMARY"
 
@@ -95,8 +101,7 @@ console.log(`service status=${s?.service?.runtime?.status} managerUid=${s?.servi
 ' | tee -a "$SUMMARY"
 
 say "seed a cron job through the shipped CLI"
-"$PUBLISHED_BIN" cron add --every 1d --agent main --message "proof turn" \
-  --display-name proof-job --json 2>&1 | tail -4
+"$PUBLISHED_BIN" cron add proof-job --every 1d --agent main --message "proof turn" --json 2>&1 | tail -4
 "$PUBLISHED_BIN" cron list --json >/tmp/cron-before.json 2>/dev/null || true
 node -e '
 const jobs = require("/tmp/cron-before.json");

@@ -1,0 +1,98 @@
+name: canonical-published-driver-update
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_ref:
+        description: PR branch in SunnyShu0925/openclaw
+        required: true
+        default: fix/managed-service-handoff-control-deadline-monotonic-164
+      driver_version:
+        description: Published stable driver version
+        required: true
+        default: "2026.10.8"
+
+permissions:
+  contents: read
+
+jobs:
+  canonical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout proof harness
+        uses: actions/checkout@v4
+
+      - name: Checkout reviewed PR head
+        uses: actions/checkout@v4
+        with:
+          repository: SunnyShu0925/openclaw
+          ref: ${{ inputs.pr_ref }}
+          path: openclaw
+
+      - name: Report head identity
+        working-directory: openclaw
+        run: |
+          git rev-parse HEAD
+          git log -1 --format='%H %s'
+
+      - name: Setup Node 24.22.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          (cd openclaw && corepack install)
+
+      - name: Install workspace dependencies
+        working-directory: openclaw
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the CLI/dist from the reviewed head
+        working-directory: openclaw
+        run: pnpm build cliStartup
+        continue-on-error: true
+
+      - name: Package the canonical candidate artifact
+        working-directory: openclaw
+        run: |
+          node scripts/package-openclaw-for-docker.mjs --skip-build --allow-unreleased-changelog \
+            --output-dir "$GITHUB_WORKSPACE/artifacts/pkg" --output-name openclaw-candidate.tgz
+          ls -l "$GITHUB_WORKSPACE/artifacts/pkg"
+          tar -xzOf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
+            package/dist/update-managed-service-handoff-current-*.mjs \
+            | grep -o 'scheduleAbsoluteDeadline(performance.now() + timeoutMs[^;]*' | head -1
+
+      - name: Run the project's published-driver update cell
+        working-directory: openclaw
+        run: |
+          export CELL_DEADLINE_EPOCH_SECONDS=$(( $(date +%s) + 2400 ))
+          bash scripts/e2e/published-driver-update-docker.sh \
+            "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
+            "$GITHUB_WORKSPACE/artifacts/update" \
+            "${{ inputs.driver_version }}"
+
+      - name: Summarize cell artifacts
+        if: always()
+        run: |
+          set +e
+          echo "--- phase ---"
+          cat artifacts/update/phase.txt 2>/dev/null
+          echo "--- cell stdout (tail) ---"
+          ls artifacts/update
+          for f in artifacts/update/*.stdout; do
+            echo "### $f"
+            head -6 "$f"
+          done
+          echo "--- systemctl shim log ---"
+          cat artifacts/update/systemctl.log 2>/dev/null | head -40
+
+      - name: Upload cell artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-update-artifacts
+          path: artifacts/update
+          if-no-files-found: warn

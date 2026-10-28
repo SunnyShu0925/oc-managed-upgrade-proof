@@ -25,6 +25,7 @@ jobs:
           repository: SunnyShu0925/openclaw
           ref: ${{ inputs.pr_ref }}
           path: openclaw
+          fetch-depth: 2
 
       - name: Report head identity
         working-directory: openclaw
