@@ -96,11 +96,17 @@ jobs:
             echo "::error title=Inconclusive::The failure is a harness/sealed-runtime error, not the deadline assertion."
             exit 1
           fi
-          if ! grep -q "did not signal readiness within 30 seconds" /tmp/base-test.log; then
-            echo "::error title=Inconclusive::The failure did not show the expected readiness-timeout assertion."
+          # Without the monotonic clock the rewound budget never expires, so the
+          # fixture hangs and the case dies on its own test timeout instead of the
+          # readiness-timeout assertion. Either signature proves the bug.
+          if grep -q "did not signal readiness within 30 seconds" /tmp/base-test.log; then
+            echo "BASE_RED_SIGNATURE=readiness-timeout-assertion"
+          elif grep -q "Test timed out in 120000ms" /tmp/base-test.log; then
+            echo "BASE_RED_SIGNATURE=deadline-never-fires (test timeout after the 90s rewind)"
+          else
+            echo "::error title=Inconclusive::The base failure shows neither the timeout assertion nor the hang."
             exit 1
           fi
-          echo "BASE_RED_ASSERTION=did not signal readiness within 30 seconds"
 
       - name: Restore the reviewed file
         working-directory: openclaw
