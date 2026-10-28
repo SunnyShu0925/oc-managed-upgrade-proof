@@ -52,7 +52,7 @@ jobs:
 
       - name: Build the CLI/dist from the reviewed head
         working-directory: openclaw
-        run: pnpm build cliStartup
+        run: pnpm build:ci-artifacts
         continue-on-error: true
 
       - name: Package the canonical candidate artifact
