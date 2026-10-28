@@ -1,0 +1,109 @@
+name: regression-red-green
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_ref:
+        description: PR branch in SunnyShu0925/openclaw
+        required: true
+        default: fix/managed-service-handoff-control-deadline-monotonic-164
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout proof harness
+        uses: actions/checkout@v4
+
+      - name: Checkout reviewed PR head
+        uses: actions/checkout@v4
+        with:
+          repository: SunnyShu0925/openclaw
+          ref: ${{ inputs.pr_ref }}
+          path: openclaw
+
+      - name: Report head identity
+        working-directory: openclaw
+        run: |
+          git rev-parse HEAD
+          git log -1 --format='%H %s'
+          git log -1 --format=%H -- src/infra/update-managed-service-handoff-control.ts
+
+      - name: Setup Node 24.22.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          (cd openclaw && corepack install)
+
+      - name: Install workspace dependencies
+        working-directory: openclaw
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the CLI/dist from the reviewed head
+        working-directory: openclaw
+        run: pnpm build cliStartup
+        continue-on-error: true
+
+      - name: Regression at head (expect PASS)
+        working-directory: openclaw
+        run: |
+          set +e
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.infra.config.ts \
+            src/infra/update-managed-service-handoff-lifecycle.test.ts \
+            -t "readiness timeout after a wall-clock rewind" >/tmp/head-test.log 2>&1
+          HEAD_RC=$?
+          set -e
+          tail -25 /tmp/head-test.log
+          echo "HEAD_RC=$HEAD_RC"
+          if [ "$HEAD_RC" -ne 0 ]; then
+            echo "::error title=Head regression failed::The rewind case must pass on the reviewed head."
+            exit 1
+          fi
+
+      - name: Revert only the production file to its parent (base)
+        working-directory: openclaw
+        run: |
+          git diff --stat
+          git checkout "HEAD~1" -- src/infra/update-managed-service-handoff-control.ts
+          git diff --stat
+          git diff -- src/infra/update-managed-service-handoff-control.ts | head -40
+
+      - name: Regression on base source (expect FAIL with the timeout assertion)
+        working-directory: openclaw
+        run: |
+          set +e
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.infra.config.ts \
+            src/infra/update-managed-service-handoff-lifecycle.test.ts \
+            -t "readiness timeout after a wall-clock rewind" >/tmp/base-test.log 2>&1
+          BASE_RC=$?
+          set -e
+          tail -30 /tmp/base-test.log
+          echo "BASE_RC=$BASE_RC"
+          if [ "$BASE_RC" -eq 0 ]; then
+            echo "::error title=Base regression passed unexpectedly::The rewind case must fail without the fix."
+            exit 1
+          fi
+          if grep -q "Managed handoff requires its sealed runtime" /tmp/base-test.log; then
+            echo "::error title=Inconclusive::The failure is a harness/sealed-runtime error, not the deadline assertion."
+            exit 1
+          fi
+          if ! grep -q "did not signal readiness within 30 seconds" /tmp/base-test.log; then
+            echo "::error title=Inconclusive::The failure did not show the expected readiness-timeout assertion."
+            exit 1
+          fi
+          echo "BASE_RED_ASSERTION=did not signal readiness within 30 seconds"
+
+      - name: Restore the reviewed file
+        working-directory: openclaw
+        run: git checkout "HEAD" -- src/infra/update-managed-service-handoff-control.ts && git status --short
+
+      - name: Verdict
+        run: echo "VERDICT=PASS head-green base-red"
