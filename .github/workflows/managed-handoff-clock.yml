@@ -19,6 +19,14 @@ on:
         description: "when the clock step lands: owned-command (pre-fix) | service-stop (fixed)"
         required: false
         default: ""
+      package_version:
+        description: "optional: pin the built package version (baked into the CLI version constant)"
+        required: false
+        default: ""
+      driver_run_id:
+        description: "optional: use the head build from this earlier run as the installed driver"
+        required: false
+        default: ""
       reuse_run_id:
         description: "optional: reuse the packaged head build from this earlier run of this workflow"
         required: false
@@ -78,6 +86,21 @@ jobs:
         working-directory: openclaw
         run: pnpm install --frozen-lockfile
 
+      - name: Pin the build version
+        if: inputs.reuse_run_id == '' && inputs.package_version != ''
+        working-directory: openclaw
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const path = "package.json";
+            const doc = JSON.parse(fs.readFileSync(path, "utf8"));
+            doc.version = process.env.PACKAGE_VERSION;
+            fs.writeFileSync(path, JSON.stringify(doc, null, 2) + "\n");
+            console.log("pinned_version=" + doc.version);
+          '
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+
       - name: Build the CLI/dist from the reviewed head
         if: inputs.reuse_run_id == ''
         working-directory: openclaw
@@ -102,16 +125,22 @@ jobs:
 
       - name: Resolve head and candidate versions
         run: |
+          export PINNED_VERSION="${{ inputs.package_version }}"
           tar -xzOf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-head.tgz" package/package.json \
             > "$GITHUB_WORKSPACE/artifacts/pkg/manifest-head.json"
           node -e '
             const fs = require("node:fs");
             const file = process.env.GITHUB_WORKSPACE + "/artifacts/pkg/manifest-head.json";
             const head = JSON.parse(fs.readFileSync(file, "utf8")).version;
-            const parts = String(head).split("-")[0].split(".").map(Number);
-            while (parts.length < 3) parts.push(0);
-            parts[2] += 1;
-            const next = parts.join(".");
+            let next;
+            if (process.env.PINNED_VERSION) {
+              next = process.env.PINNED_VERSION;
+            } else {
+              const parts = String(head).split("-")[0].split(".").map(Number);
+              while (parts.length < 3) parts.push(0);
+              parts[2] += 1;
+              next = parts.join(".");
+            }
             fs.appendFileSync(process.env.GITHUB_ENV, `HEAD_VERSION=${head}\nCANDIDATE_VERSION=${next}\n`);
             console.log("head_version=" + head + " candidate_version=" + next);
           '
@@ -133,6 +162,15 @@ jobs:
           node -e 'console.log("candidate_manifest_version=", require("/tmp/relabel/package/package.json").version)'
           ls -l artifacts/pkg
 
+      - name: Use an earlier head build as the driver
+        if: inputs.driver_run_id != '' && inputs.arm == 'head'
+        uses: actions/download-artifact@v4
+        with:
+          name: head-build
+          path: artifacts/driver
+          run-id: ${{ inputs.driver_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install the driver for this arm
         run: |
           set -euo pipefail
@@ -140,6 +178,9 @@ jobs:
           echo "npm_prefix=$NPM_PREFIX" | tee -a "$GITHUB_ENV"
           if [ "${{ inputs.arm }}" = "prefix" ]; then
             npm install -g openclaw@2026.10.8 --no-audit --no-fund
+          elif [ -f "$GITHUB_WORKSPACE/artifacts/driver/openclaw-head.tgz" ]; then
+            echo "driver_source=earlier-head-build"
+            npm install -g "$GITHUB_WORKSPACE/artifacts/driver/openclaw-head.tgz" --no-audit --no-fund
           else
             npm install -g "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-head.tgz" --no-audit --no-fund
           fi
