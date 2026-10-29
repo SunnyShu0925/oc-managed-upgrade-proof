@@ -15,6 +15,10 @@ on:
         description: PR branch in SunnyShu0925/openclaw
         required: true
         default: fix/managed-service-handoff-control-deadline-monotonic-164
+      arm_on:
+        description: "when the clock step lands: owned-command (pre-fix) | service-stop (fixed)"
+        required: false
+        default: ""
       reuse_run_id:
         description: "optional: reuse the packaged head build from this earlier run of this workflow"
         required: false
@@ -174,8 +178,13 @@ jobs:
           UNIT="$HOME/.config/systemd/user/openclaw-gateway.service"
           echo "--- unit before hook ---"
           grep -E "^Environment=" "$UNIT"
+          ARM_ON="${{ inputs.arm_on }}"
+          if [ -z "$ARM_ON" ]; then
+            if [ "${{ inputs.arm }}" = "prefix" ]; then ARM_ON=owned-command; else ARM_ON=service-stop; fi
+          fi
+          echo "clock_arm_on=$ARM_ON"
           sed -i "/^Environment=PROOF_/d;/^Environment=NODE_OPTIONS=/d" "$UNIT"
-          sed -i "/^\[Service\]/a Environment=NODE_OPTIONS=--require=$GITHUB_WORKSPACE/harness/clock-step.cjs\nEnvironment=PROOF_CLOCK_LOG=$GITHUB_WORKSPACE/clock-${{ inputs.arm }}-${{ inputs.offset_ms }}.log\nEnvironment=PROOF_CLOCK_OFFSET_MS=${{ inputs.offset_ms }}\nEnvironment=PROOF_CLOCK_REV=${{ inputs.arm }}" "$UNIT"
+          sed -i "/^\[Service\]/a Environment=NODE_OPTIONS=--require=$GITHUB_WORKSPACE/harness/clock-step.cjs\nEnvironment=PROOF_CLOCK_LOG=$GITHUB_WORKSPACE/clock-${{ inputs.arm }}-${{ inputs.offset_ms }}.log\nEnvironment=PROOF_CLOCK_OFFSET_MS=${{ inputs.offset_ms }}\nEnvironment=PROOF_CLOCK_REV=${{ inputs.arm }}\nEnvironment=PROOF_CLOCK_ARM_ON=$ARM_ON" "$UNIT"
           systemctl --user daemon-reload
           echo "--- unit after hook ---"
           grep -E "^Environment=(NODE_OPTIONS|PROOF_)" "$UNIT"
@@ -264,6 +273,8 @@ jobs:
             echo "installed_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
             echo "installed_anchor_files=$(grep -rl monotonicDeadlineFromWallClock "$NPM_PREFIX/lib/node_modules/openclaw/dist" 2>/dev/null | wc -l)"
             echo "installed_wallclock_budget_files=$(grep -rl 'deadline - Date.now()' "$NPM_PREFIX/lib/node_modules/openclaw/dist" 2>/dev/null | wc -l)"
+            echo "=== update outcome ==="
+            grep -E '"status"|"reason"|"code"' handoff-dir-*/handoff.log 2>/dev/null | head -8
             echo "=== gateway unit tail ==="
             journalctl --user -u openclaw-gateway.service --no-pager 2>/dev/null | tail -20
 

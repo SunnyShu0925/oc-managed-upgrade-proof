@@ -28,6 +28,9 @@ const LOG = process.env.PROOF_CLOCK_LOG || "/tmp/clock-step.log";
 const OFFSET_MS = Number(process.env.PROOF_CLOCK_OFFSET_MS || "0");
 const REV = (process.env.PROOF_CLOCK_REV || "head").toLowerCase();
 const ARM_DELAY_MS = Number(process.env.PROOF_ARM_DELAY_MS || "300");
+// When the step lands: at process start, when the helper spawns the update
+// child (activation begins), or when the helper dispatches the service stop.
+const ARM_ON = (process.env.PROOF_CLOCK_ARM_ON || "startup").toLowerCase();
 const realNow = Date.now;
 
 let armed = false;
@@ -56,7 +59,7 @@ if (ROLE === "helper" || ROLE === "cli") {
     `loaded script=${ARG0} argv=${process.argv.slice(2, 5).join(" ")} offsetMs=${OFFSET_MS} revision=${REV} wallNow=${realNow()} monoNow=${performance.now().toFixed(1)}`,
   );
 
-  if (REV !== "head") {
+  if (ARM_ON === "startup" && REV !== "head") {
     // Pre-fix revisions keep the raw wall-clock epoch and re-read it per command,
     // so the step only has to land before the first activation command.
     setTimeout(() => arm("startup"), ARM_DELAY_MS).unref?.();
@@ -87,6 +90,14 @@ if (ROLE === "helper" || ROLE === "cli") {
         const file = options?.file;
         const args = Array.isArray(options?.args) ? options.args : [];
         const nodeBinary = /(^|[\\/])node$/.test(String(file ?? ""));
+        const spawnsUpdateChild =
+          ROLE === "helper" &&
+          nodeBinary &&
+          args.some((arg) => /dist[\\/]index\.js$/.test(String(arg))) &&
+          args.includes("update");
+        const stopsService = ROLE === "helper" && file === "systemctl" && args.includes("stop");
+        if (!armed && ARM_ON === "owned-command" && spawnsUpdateChild) arm("owned-command");
+        if (!armed && ARM_ON === "service-stop" && stopsService) arm("service-stop");
         const interesting =
           file === "systemctl" ||
           file === "systemd-run" ||
