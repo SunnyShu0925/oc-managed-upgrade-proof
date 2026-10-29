@@ -1,0 +1,61 @@
+name: pack-candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_ref:
+        description: PR branch in SunnyShu0925/openclaw
+        required: true
+        default: fix/managed-service-handoff-recovery-deadline-wall-clock-165
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout reviewed PR head
+        uses: actions/checkout@v4
+        with:
+          repository: SunnyShu0925/openclaw
+          ref: ${{ inputs.pr_ref }}
+
+      - name: Report head identity
+        run: |
+          git rev-parse HEAD
+          git log -1 --format='%H %s'
+
+      - name: Setup Node 24.22.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the CLI/dist from the reviewed head
+        run: pnpm build:ci-artifacts
+
+      - name: Package the canonical candidate artifact
+        run: |
+          node scripts/package-openclaw-for-docker.mjs --skip-build --allow-unreleased-changelog \
+            --output-dir "$GITHUB_WORKSPACE/pkg" --output-name openclaw-candidate.tgz
+          ls -l "$GITHUB_WORKSPACE/pkg"
+          node -e 'const p=require(process.env.GITHUB_WORKSPACE+"/pkg/package/package.json");console.log("ignored")' 2>/dev/null || true
+          tar -xzOf "$GITHUB_WORKSPACE/pkg/openclaw-candidate.tgz" package/package.json | head -5
+          tar -xzOf "$GITHUB_WORKSPACE/pkg/openclaw-candidate.tgz" package/package.json \
+            | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log("candidate_version="+JSON.parse(s).version))'
+
+      - name: Upload candidate tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-tarball
+          path: pkg/openclaw-candidate.tgz
+          if-no-files-found: error
