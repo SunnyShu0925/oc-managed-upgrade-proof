@@ -1,0 +1,40 @@
+name: smoke-systemd-user
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: note
+        required: false
+        default: smoke
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Identity
+        run: |
+          id
+          ps -p 1 -o comm=
+          systemctl --version | head -1
+          cat /proc/1/cgroup | head -3
+
+      - name: User systemd
+        run: |
+          set -x
+          sudo loginctl enable-linger "$(id -un)" || true
+          sleep 2
+          systemctl --user --no-pager status || true
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          ls -la "$XDG_RUNTIME_DIR" || true
+          systemctl --user is-system-running || true
+          systemctl --user list-units --type=service --no-pager | head -20 || true
+
+      - name: Container detection sanity
+        run: |
+          ls -la /.dockerenv /run/.containerenv /var/run/.containerenv 2>&1 || true
+          node -e 'const fs=require("node:fs");try{console.log(fs.readFileSync("/proc/1/cgroup","utf8"))}catch(e){console.log("no cgroup")}'
