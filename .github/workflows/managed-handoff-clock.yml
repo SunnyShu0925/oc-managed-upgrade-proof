@@ -1,0 +1,241 @@
+name: managed-handoff-clock
+
+on:
+  workflow_dispatch:
+    inputs:
+      arm:
+        description: "prefix (published 2026.10.8 driver) | head (built PR head driver)"
+        required: true
+        default: prefix
+      offset_ms:
+        description: "wall-clock step applied inside the handoff helper and update child"
+        required: true
+        default: "-90000"
+      pr_ref:
+        description: PR branch in SunnyShu0925/openclaw
+        required: true
+        default: fix/managed-service-handoff-control-deadline-monotonic-164
+
+permissions:
+  contents: read
+
+jobs:
+  clock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PORT_GATEWAY: "19021"
+      PORT_REGISTRY: "48731"
+    steps:
+      - name: Checkout proof harness
+        uses: actions/checkout@v4
+
+      - name: Checkout reviewed PR head
+        uses: actions/checkout@v4
+        with:
+          repository: SunnyShu0925/openclaw
+          ref: ${{ inputs.pr_ref }}
+          path: openclaw
+
+      - name: Report head identity
+        working-directory: openclaw
+        run: |
+          echo "head_commit=$(git rev-parse HEAD)"
+          git log -1 --format='%H %s'
+
+      - name: Setup Node 24.22.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          (cd openclaw && corepack install)
+
+      - name: Install workspace dependencies
+        working-directory: openclaw
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the CLI/dist from the reviewed head
+        working-directory: openclaw
+        run: pnpm build:ci-artifacts
+        continue-on-error: true
+
+      - name: Package the reviewed head
+        working-directory: openclaw
+        run: |
+          node scripts/package-openclaw-for-docker.mjs --skip-build --allow-unreleased-changelog \
+            --output-dir "$GITHUB_WORKSPACE/artifacts/pkg" --output-name openclaw-head.tgz
+          HEAD_VERSION=$(tar -xzOf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-head.tgz" package/package.json \
+            | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).version))')
+          echo "HEAD_VERSION=$HEAD_VERSION" >> "$GITHUB_ENV"
+          CANDIDATE_VERSION=$(node -e '
+            const parts = String(process.env.HEAD_VERSION).split("-")[0].split(".").map(Number);
+            while (parts.length < 3) parts.push(0);
+            parts[2] += 1;
+            console.log(parts.join("."));
+          ')
+          echo "CANDIDATE_VERSION=$CANDIDATE_VERSION" >> "$GITHUB_ENV"
+          echo "head_version=$HEAD_VERSION candidate_version=$CANDIDATE_VERSION"
+
+      - name: Relabel a copy of the head build as the update target
+        run: |
+          set -eu
+          rm -rf /tmp/relabel && mkdir -p /tmp/relabel
+          tar -xzf artifacts/pkg/openclaw-head.tgz -C /tmp/relabel
+          node -e '
+            const fs = require("node:fs");
+            const path = "/tmp/relabel/package/package.json";
+            const doc = JSON.parse(fs.readFileSync(path, "utf8"));
+            doc.version = process.env.CANDIDATE_VERSION;
+            fs.writeFileSync(path, JSON.stringify(doc, null, 2));
+          '
+          tar -czf artifacts/pkg/openclaw-candidate.tgz -C /tmp/relabel package
+          cp /tmp/relabel/package/package.json artifacts/pkg/manifest-candidate.json
+          node -e 'console.log("candidate_manifest_version=", require("/tmp/relabel/package/package.json").version)'
+          ls -l artifacts/pkg
+
+      - name: Install the driver for this arm
+        run: |
+          set -euo pipefail
+          NPM_PREFIX=$(npm prefix -g)
+          echo "npm_prefix=$NPM_PREFIX" | tee -a "$GITHUB_ENV"
+          if [ "${{ inputs.arm }}" = "prefix" ]; then
+            npm install -g openclaw@2026.10.8 --no-audit --no-fund
+          else
+            npm install -g "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-head.tgz" --no-audit --no-fund
+          fi
+          DRIVER_BIN="$NPM_PREFIX/bin/openclaw"
+          echo "DRIVER_BIN=$DRIVER_BIN" >> "$GITHUB_ENV"
+          DRIVER_PKG="$NPM_PREFIX/lib/node_modules/openclaw"
+          echo "DRIVER_PKG=$DRIVER_PKG" >> "$GITHUB_ENV"
+          "$DRIVER_BIN" --version
+          echo "driver_monotonic_anchor_files=$(grep -rl monotonicDeadlineFromWallClock "$DRIVER_PKG/dist" 2>/dev/null | wc -l)" | tee -a "$GITHUB_ENV"
+          echo "driver_wallclock_budget_files=$(grep -rl 'deadline - Date.now()' "$DRIVER_PKG/dist" 2>/dev/null | wc -l)" | tee -a "$GITHUB_ENV"
+
+      - name: Start the loopback registry that serves the update target
+        run: |
+          set -euo pipefail
+          rm -f /tmp/registry.log
+          PROOF_REGISTRY_PORT=$PORT_REGISTRY \
+          PROOF_TARBALL="$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
+          PROOF_CANDIDATE_VERSION="$CANDIDATE_VERSION" \
+          PROOF_CANDIDATE_MANIFEST="$GITHUB_WORKSPACE/artifacts/pkg/manifest-candidate.json" \
+          PROOF_REGISTRY_LOG=/tmp/registry.log \
+          nohup node "$GITHUB_WORKSPACE/harness/registry-proxy.mjs" >/tmp/registry.stdout 2>&1 &
+          for i in $(seq 1 30); do grep -q 'listening on' /tmp/registry.log 2>/dev/null && break; sleep 1; done
+          head -1 /tmp/registry.log
+          printf 'registry=http://127.0.0.1:%s/\n' "$PORT_REGISTRY" > ~/.npmrc
+          cat ~/.npmrc
+
+      - name: Install the managed Gateway service
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$(id -un)"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          naive() { "$DRIVER_BIN" "$@"; }
+          naive config set gateway.mode local
+          naive config set gateway.port "$PORT_GATEWAY"
+          naive gateway install --force --port "$PORT_GATEWAY"
+          UNIT="$HOME/.config/systemd/user/openclaw-gateway.service"
+          echo "--- unit before hook ---"
+          grep -E "^Environment=" "$UNIT"
+          sed -i "/^Environment=PROOF_/d;/^Environment=NODE_OPTIONS=/d" "$UNIT"
+          sed -i "/^\[Service\]/a Environment=NODE_OPTIONS=--require=$GITHUB_WORKSPACE/harness/clock-step.cjs\nEnvironment=PROOF_CLOCK_LOG=$GITHUB_WORKSPACE/clock-${{ inputs.arm }}-${{ inputs.offset_ms }}.log\nEnvironment=PROOF_CLOCK_OFFSET_MS=${{ inputs.offset_ms }}\nEnvironment=PROOF_CLOCK_REV=${{ inputs.arm }}" "$UNIT"
+          systemctl --user daemon-reload
+          echo "--- unit after hook ---"
+          grep -E "^Environment=(NODE_OPTIONS|PROOF_)" "$UNIT"
+          systemctl --user restart openclaw-gateway.service
+          for i in $(seq 1 90); do
+            CODE=$(curl -s -m 2 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_GATEWAY/health" || true)
+            [ "$CODE" = "200" ] && break
+            sleep 2
+          done
+          echo "pre_health=$(curl -s -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:$PORT_GATEWAY/health)"
+          echo "pre_unit_active=$(systemctl --user is-active openclaw-gateway.service)"
+          echo "pre_main_pid=$(systemctl --user show -p MainPID --value openclaw-gateway.service)"
+          echo "pre_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
+
+      - name: Seed operator state
+        run: |
+          mkdir -p ~/.openclaw/workspace
+          echo "MARKER-${{ inputs.arm }}" > ~/.openclaw/proof-marker
+          echo "workspace-${{ inputs.arm }}" > ~/.openclaw/workspace/note.txt
+          echo "config_sha_before=$(sha256sum ~/.openclaw/openclaw.json | cut -d' ' -f1)"
+
+      - name: Drive the shipped update entry under a stepped wall clock
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          START=$(date +%s)
+          set +e
+          "$DRIVER_BIN" gateway call update.run --params '{"timeoutMs":900000}' --timeout 900000 --json \
+            > update-rpc.json 2> update-rpc.err
+          echo "rpc_exit=$?"
+          set -e
+          echo "rpc_duration_s=$(( $(date +%s) - START ))"
+          head -c 600 update-rpc.err
+          node -e '
+            const fs = require("node:fs");
+            const d = JSON.parse(fs.readFileSync("update-rpc.json", "utf8"));
+            console.log("handoff=", JSON.stringify(d.handoff));
+            const res = d.result || {};
+            console.log("result_status=", res.status, "reason=", res.reason);
+            for (const step of res.steps || []) console.log("  step:", step.name, "dur=", step.durationMs, "exit=", step.exitCode);
+          '
+
+      - name: Settle and collect the production handoff trace
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          START=$(date +%s)
+          j=0
+          while [ $j -lt 150 ]; do
+            HELPERS=$(pgrep -f "handoff.cjs" 2>/dev/null | tr '\n' ' ' || true)
+            ACTIVE=$(systemctl --user is-active openclaw-gateway.service 2>/dev/null)
+            CODE=$(curl -s -m 2 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_GATEWAY/health" || true)
+            if [ -z "$HELPERS" ] && [ "$ACTIVE" = "active" ] && [ "$CODE" = "200" ]; then break; fi
+            j=$((j+1)); sleep 4
+          done
+          echo "settle_waits=$j elapsed_s=$(( $(date +%s) - START ))"
+          echo "after_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
+          echo "after_unit_active=$(systemctl --user is-active openclaw-gateway.service)"
+          echo "after_health=$(curl -s -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:$PORT_GATEWAY/health)"
+          echo "after_marker=$(cat ~/.openclaw/proof-marker 2>/dev/null)"
+          echo "after_workspace=$(cat ~/.openclaw/workspace/note.txt 2>/dev/null)"
+          echo "config_sha_after=$(sha256sum ~/.openclaw/openclaw.json | cut -d' ' -f1)"
+          echo
+      - name: Print the production handoff trace
+        if: always
+        run: |
+            set +e
+            echo "=== production handoff log ==="
+            for d in /tmp/openclaw-update-run-handoff-*; do
+              [ -d "$d" ] || continue
+              echo "## $d"
+              ls -la "$d" | tail -n +2 | awk '{print $5, $9}'
+              cat "$d/handoff.log" 2>/dev/null
+              cp -a "$d" "$GITHUB_WORKSPACE/handoff-dir-$(basename "$d")" 2>/dev/null
+            done
+            echo
+            echo "=== clock step log ==="
+            cat "$GITHUB_WORKSPACE/clock-${{ inputs.arm }}-${{ inputs.offset_ms }}.log" 2>/dev/null
+            echo
+            echo "=== registry requests ==="
+            wc -l /tmp/registry.log
+            echo
+            echo "=== installed candidate fingerprint ==="
+            echo "installed_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
+            echo "installed_anchor_files=$(grep -rl monotonicDeadlineFromWallClock "$NPM_PREFIX/lib/node_modules/openclaw/dist" 2>/dev/null | wc -l)"
+
+
+      - name: Upload trace
+        if: always
+        uses: actions/upload-artifact@v4
+        with:
+          name: clock-trace-${{ inputs.arm }}-${{ inputs.offset_ms }}
+          path: |
+            clock-*.log
+            update-rpc.json
+            update-rpc.err
+            handoff-dir-*
+          if-no-files-found: warn
