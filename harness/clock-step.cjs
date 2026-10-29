@@ -86,12 +86,14 @@ if (ROLE === "helper" || ROLE === "cli") {
       try {
         const file = options?.file;
         const args = Array.isArray(options?.args) ? options.args : [];
+        const nodeBinary = /(^|[\\/])node$/.test(String(file ?? ""));
         const interesting =
           file === "systemctl" ||
           file === "systemd-run" ||
           file === "launchctl" ||
           file === "schtasks" ||
-          /handoff\.cjs$/.test(String(args[0] ?? ""));
+          /handoff\.cjs$/.test(String(args[0] ?? "")) ||
+          nodeBinary;
         if (interesting) {
           const shown = args.map((arg) => String(arg).slice(0, 120)).join(" ");
           log(

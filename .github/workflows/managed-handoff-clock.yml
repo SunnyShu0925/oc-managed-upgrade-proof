@@ -218,14 +218,15 @@ jobs:
 
       - name: Settle and collect the production handoff trace
         run: |
+          set +e
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           START=$(date +%s)
           j=0
           while [ $j -lt 150 ]; do
             HELPERS=$(pgrep -f "handoff.cjs" 2>/dev/null | tr '\n' ' ' || true)
-            ACTIVE=$(systemctl --user is-active openclaw-gateway.service 2>/dev/null)
+            ACTIVE=$(systemctl --user is-active openclaw-gateway.service 2>/dev/null || true)
             CODE=$(curl -s -m 2 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_GATEWAY/health" || true)
-            VERSION=$("$DRIVER_BIN" --version 2>&1 | tail -1)
+            VERSION=$("$DRIVER_BIN" --version 2>&1 | tail -1 || true)
             FINAL=$(echo "$VERSION" | grep -c "$CANDIDATE_VERSION" || true)
             if [ -z "$HELPERS" ] && [ "$ACTIVE" = "active" ] && [ "$CODE" = "200" ] && [ "$FINAL" = "1" ]; then break; fi
             j=$((j+1)); sleep 4
@@ -233,7 +234,7 @@ jobs:
           echo "still_running=$(pgrep -af handoff.cjs | tr '\n' ';' || true)"
           echo "settle_waits=$j elapsed_s=$(( $(date +%s) - START ))"
           echo "after_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
-          echo "after_unit_active=$(systemctl --user is-active openclaw-gateway.service)"
+          echo "after_unit_active=$(systemctl --user is-active openclaw-gateway.service || true)"
           echo "after_health=$(curl -s -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:$PORT_GATEWAY/health)"
           echo "after_marker=$(cat ~/.openclaw/proof-marker 2>/dev/null)"
           echo "after_workspace=$(cat ~/.openclaw/workspace/note.txt 2>/dev/null)"
@@ -262,6 +263,8 @@ jobs:
             echo "installed_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
             echo "installed_anchor_files=$(grep -rl monotonicDeadlineFromWallClock "$NPM_PREFIX/lib/node_modules/openclaw/dist" 2>/dev/null | wc -l)"
             echo "installed_wallclock_budget_files=$(grep -rl 'deadline - Date.now()' "$NPM_PREFIX/lib/node_modules/openclaw/dist" 2>/dev/null | wc -l)"
+            echo "=== gateway unit tail ==="
+            journalctl --user -u openclaw-gateway.service --no-pager 2>/dev/null | tail -20
 
 
       - name: Upload trace
