@@ -64,6 +64,7 @@ jobs:
           node-version: 24.22.1
 
       - name: Enable pnpm
+        if: inputs.reuse_run_id == ''
         run: |
           corepack enable
           (cd openclaw && corepack install)
