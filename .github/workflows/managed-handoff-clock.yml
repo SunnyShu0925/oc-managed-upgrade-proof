@@ -15,6 +15,10 @@ on:
         description: PR branch in SunnyShu0925/openclaw
         required: true
         default: fix/managed-service-handoff-control-deadline-monotonic-164
+      reuse_run_id:
+        description: "optional: reuse the packaged head build from this earlier run of this workflow"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -30,7 +34,17 @@ jobs:
       - name: Checkout proof harness
         uses: actions/checkout@v4
 
+      - name: Reuse the packaged head build from an earlier run
+        if: inputs.reuse_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: head-build
+          path: artifacts/pkg
+          run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Checkout reviewed PR head
+        if: inputs.reuse_run_id == ''
         uses: actions/checkout@v4
         with:
           repository: SunnyShu0925/openclaw
@@ -38,6 +52,7 @@ jobs:
           path: openclaw
 
       - name: Report head identity
+        if: inputs.reuse_run_id == ''
         working-directory: openclaw
         run: |
           echo "head_commit=$(git rev-parse HEAD)"
@@ -54,30 +69,47 @@ jobs:
           (cd openclaw && corepack install)
 
       - name: Install workspace dependencies
+        if: inputs.reuse_run_id == ''
         working-directory: openclaw
         run: pnpm install --frozen-lockfile
 
       - name: Build the CLI/dist from the reviewed head
+        if: inputs.reuse_run_id == ''
         working-directory: openclaw
         run: pnpm build:ci-artifacts
         continue-on-error: true
 
       - name: Package the reviewed head
+        if: inputs.reuse_run_id == ''
         working-directory: openclaw
         run: |
           node scripts/package-openclaw-for-docker.mjs --skip-build --allow-unreleased-changelog \
             --output-dir "$GITHUB_WORKSPACE/artifacts/pkg" --output-name openclaw-head.tgz
-          HEAD_VERSION=$(tar -xzOf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-head.tgz" package/package.json \
-            | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).version))')
-          echo "HEAD_VERSION=$HEAD_VERSION" >> "$GITHUB_ENV"
-          CANDIDATE_VERSION=$(node -e '
-            const parts = String(process.env.HEAD_VERSION).split("-")[0].split(".").map(Number);
+          ls -l "$GITHUB_WORKSPACE/artifacts/pkg"
+
+      - name: Keep the packaged head for later arms
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: head-build
+          path: artifacts/pkg
+          if-no-files-found: warn
+
+      - name: Resolve head and candidate versions
+        run: |
+          tar -xzOf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-head.tgz" package/package.json \
+            > "$GITHUB_WORKSPACE/artifacts/pkg/manifest-head.json"
+          node -e '
+            const fs = require("node:fs");
+            const file = process.env.GITHUB_WORKSPACE + "/artifacts/pkg/manifest-head.json";
+            const head = JSON.parse(fs.readFileSync(file, "utf8")).version;
+            const parts = String(head).split("-")[0].split(".").map(Number);
             while (parts.length < 3) parts.push(0);
             parts[2] += 1;
-            console.log(parts.join("."));
-          ')
-          echo "CANDIDATE_VERSION=$CANDIDATE_VERSION" >> "$GITHUB_ENV"
-          echo "head_version=$HEAD_VERSION candidate_version=$CANDIDATE_VERSION"
+            const next = parts.join(".");
+            fs.appendFileSync(process.env.GITHUB_ENV, `HEAD_VERSION=${head}\nCANDIDATE_VERSION=${next}\n`);
+            console.log("head_version=" + head + " candidate_version=" + next);
+          '
 
       - name: Relabel a copy of the head build as the update target
         run: |
@@ -193,9 +225,12 @@ jobs:
             HELPERS=$(pgrep -f "handoff.cjs" 2>/dev/null | tr '\n' ' ' || true)
             ACTIVE=$(systemctl --user is-active openclaw-gateway.service 2>/dev/null)
             CODE=$(curl -s -m 2 -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_GATEWAY/health" || true)
-            if [ -z "$HELPERS" ] && [ "$ACTIVE" = "active" ] && [ "$CODE" = "200" ]; then break; fi
+            VERSION=$("$DRIVER_BIN" --version 2>&1 | tail -1)
+            FINAL=$(echo "$VERSION" | grep -c "$CANDIDATE_VERSION" || true)
+            if [ -z "$HELPERS" ] && [ "$ACTIVE" = "active" ] && [ "$CODE" = "200" ] && [ "$FINAL" = "1" ]; then break; fi
             j=$((j+1)); sleep 4
           done
+          echo "still_running=$(pgrep -af handoff.cjs | tr '\n' ';' || true)"
           echo "settle_waits=$j elapsed_s=$(( $(date +%s) - START ))"
           echo "after_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
           echo "after_unit_active=$(systemctl --user is-active openclaw-gateway.service)"
@@ -226,6 +261,7 @@ jobs:
             echo "=== installed candidate fingerprint ==="
             echo "installed_version=$("$DRIVER_BIN" --version 2>&1 | tail -1)"
             echo "installed_anchor_files=$(grep -rl monotonicDeadlineFromWallClock "$NPM_PREFIX/lib/node_modules/openclaw/dist" 2>/dev/null | wc -l)"
+            echo "installed_wallclock_budget_files=$(grep -rl 'deadline - Date.now()' "$NPM_PREFIX/lib/node_modules/openclaw/dist" 2>/dev/null | wc -l)"
 
 
       - name: Upload trace
