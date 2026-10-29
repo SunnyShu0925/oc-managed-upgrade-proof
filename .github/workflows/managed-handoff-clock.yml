@@ -205,7 +205,7 @@ jobs:
           echo "config_sha_after=$(sha256sum ~/.openclaw/openclaw.json | cut -d' ' -f1)"
           echo
       - name: Print the production handoff trace
-        if: always
+        if: always()
         run: |
             set +e
             echo "=== production handoff log ==="
@@ -229,7 +229,7 @@ jobs:
 
 
       - name: Upload trace
-        if: always
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: clock-trace-${{ inputs.arm }}-${{ inputs.offset_ms }}
