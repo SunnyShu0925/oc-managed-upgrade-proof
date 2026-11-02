@@ -5,9 +5,10 @@
 // It applies one wall-clock correction at the boundary this PR changes:
 //   pre-fix helper  -> deadline = Date.now() + timeout, then `deadline - Date.now()`
 //                      once per command: the step resizes every command budget.
-//   post-fix helper -> `monotonicDeadlineFromWallClock` converts the epoch once
-//                      onto performance.now(); the step cannot resize anything
-//                      after that conversion.
+//   post-fix helper -> `createMonotonicBudget` seeds on performance.now() and
+//                      `commandDeadlineAt()` converts the epoch once onto the
+//                      wall clock; the step cannot resize anything after that
+//                      conversion.
 // `Date.now()` moves by offsetMs; `performance.now()` never moves.
 //
 // The step is armed from the deadline seed/translation call itself (call-stack
@@ -65,7 +66,7 @@ if (ROLE === "helper" || ROLE === "cli") {
     setTimeout(() => arm("startup"), ARM_DELAY_MS).unref?.();
   }
 
-  const SEED_SITE = /monotonicDeadlineFromWallClock|armActivationDeadline|activateTransferredGateway/;
+  const SEED_SITE = /commandDeadlineAt|createMonotonicBudget|monotonicDeadlineFromWallClock|armActivationDeadline|activateTransferredGateway/;
   Date.now = function steppableDateNow() {
     if (!armed && REV === "head") {
       const stack = new Error().stack || "";
