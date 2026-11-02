@@ -101,10 +101,13 @@ jobs:
         env:
           PACKAGE_VERSION: ${{ inputs.package_version }}
 
-      - name: Build the CLI/dist from the reviewed head
+      - name: Build the CLI/dist from the reviewed head (full/package profile)
         if: inputs.reuse_run_id == ''
         working-directory: openclaw
-        run: pnpm build:ci-artifacts
+        # package profile keeps canonical dts (incl. dist/runtime-artifacts.d.ts) that
+        # package-openclaw-for-docker --skip-build requires; build:ci-artifacts is
+        # runtime-only dts and fails the tarball integrity check since 2026-10-31.
+        run: pnpm build:package
         continue-on-error: true
 
       - name: Package the reviewed head
