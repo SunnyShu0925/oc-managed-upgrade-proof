@@ -1,0 +1,143 @@
+name: plugin-link-enotdir-update
+
+on:
+  workflow_dispatch:
+    inputs:
+      arm:
+        description: "prefix (published driver, guards narrow -> must fail) | head (reviewed driver, guards widened -> must complete)"
+        required: true
+        default: prefix
+      pr_ref:
+        description: PR branch in SunnyShu0925/openclaw
+        required: true
+        default: fix/plugin-tree-unresolved-link-enotdir-283
+      published_driver:
+        description: Published openclaw version used as the unmodified driver
+        required: false
+        default: "2026.10.9"
+      target_version:
+        description: Published version both arms update to
+        required: false
+        default: "2026.10.10-beta.5"
+      reuse_run_id:
+        description: optional: reuse the packaged head build from this earlier run
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARM: ${{ inputs.arm }}
+      PUBLISHED_DRIVER: ${{ inputs.published_driver }}
+      TARGET_VERSION: ${{ inputs.target_version }}
+      PORT_GATEWAY: "19031"
+    steps:
+      - name: Checkout proof harness
+        uses: actions/checkout@v4
+
+      - name: Reuse the packaged head build from an earlier run
+        if: inputs.reuse_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: head-build
+          path: artifacts/pkg
+          run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout reviewed PR head
+        if: inputs.arm == 'head' && inputs.reuse_run_id == ''
+        uses: actions/checkout@v4
+        with:
+          repository: SunnyShu0925/openclaw
+          ref: ${{ inputs.pr_ref }}
+          path: openclaw
+
+      - name: Report head identity
+        if: inputs.arm == 'head' && inputs.reuse_run_id == ''
+        working-directory: openclaw
+        run: |
+          git rev-parse HEAD
+          git log -1 --format='%H %s'
+
+      - name: Setup Node 24.22.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.1"
+
+      - name: Build and package the reviewed head
+        if: inputs.arm == 'head' && inputs.reuse_run_id == ''
+        working-directory: openclaw
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile
+          # package profile keeps the canonical dts that --skip-build integrity needs.
+          pnpm build:package
+          node scripts/package-openclaw-for-docker.mjs --skip-build --allow-unreleased-changelog \
+            --output-dir "$GITHUB_WORKSPACE/artifacts/pkg" --output-name openclaw-head.tgz
+          ls -l "$GITHUB_WORKSPACE/artifacts/pkg"
+
+      - name: Keep the packaged head for the other arm
+        if: inputs.arm == 'head' && always() && inputs.reuse_run_id == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: head-build
+          path: artifacts/pkg
+          if-no-files-found: warn
+
+      - name: Install the driver for this arm
+        run: |
+          set -euo pipefail
+          NPM_PREFIX=$(npm prefix -g)
+          if [ "$ARM" = prefix ]; then
+            npm install -g "openclaw@$PUBLISHED_DRIVER" --no-audit --no-fund
+            echo "driver_source=published npm release"
+          else
+            npm install -g "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-head.tgz" --no-audit --no-fund
+            echo "driver_source=package built from the reviewed head"
+          fi
+          echo "DRIVER_BIN=$NPM_PREFIX/bin/openclaw" >> "$GITHUB_ENV"
+          echo "DRIVER_PKG=$NPM_PREFIX/lib/node_modules/openclaw" >> "$GITHUB_ENV"
+          "$NPM_PREFIX/bin/openclaw" --version
+
+      - name: Run the shipped-update proof
+        run: |
+          set -euo pipefail
+          bash scripts/plugin-link-enotdir.sh "$ARM"
+
+      - name: Print the update trace
+        if: always()
+        run: |
+          set +e
+          echo "=== proof summary ==="
+          cat /tmp/proof-summary.txt
+          echo
+          echo "=== update stderr, full ==="
+          cat /tmp/update.err
+          echo
+          echo "=== update stdout, head ==="
+          head -c 3000 /tmp/update.json
+          echo
+          echo "=== candidate plugin capture traces ==="
+          grep -rhoE "plugin inventory[^\"]*|ENOTDIR[^\"]*|Copied plugin code link changed[^\"]*" \
+            /tmp/update.err /tmp/update.json 2>/dev/null | sort -u | head -20
+          echo
+          echo "=== state dir after the run ==="
+          find "$HOME/.openclaw" -maxdepth 4 -name "*plugin-link*" -o -maxdepth 4 -name "blocker" | sort
+
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-link-enotdir-$ARM
+          path: |
+            /tmp/proof-summary.txt
+            /tmp/update.json
+            /tmp/update.err
+          if-no-files-found: warn
