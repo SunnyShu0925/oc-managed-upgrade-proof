@@ -20,7 +20,7 @@ on:
         required: false
         default: "2026.10.10-beta.5"
       reuse_run_id:
-        description: optional: reuse the packaged head build from this earlier run
+        description: "optional: reuse the packaged head build from this earlier run"
         required: false
         default: ""
 
