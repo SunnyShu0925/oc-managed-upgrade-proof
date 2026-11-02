@@ -147,6 +147,13 @@ jobs:
           echo "=== update stderr, full ==="
           cat /tmp/update.err
           echo
+          echo "=== update report written by the shipped updater ==="
+          for f in "$HOME"/.openclaw/update-reports/*.md; do
+            [ -f "$f" ] || continue
+            echo "--- $f ---"
+            head -40 "$f"
+          done
+          echo
           echo "=== phase markers ==="
           grep -hoE "Phase: [a-z ]+|candidate-state-snapshot[^\"]*|OpenClaw updated to [^\"]*|Admission checks: [^\"]*" \
             /tmp/update.json /tmp/update.err 2>/dev/null | sort -u | head -20
@@ -164,4 +171,5 @@ jobs:
             /tmp/proof-summary.txt
             /tmp/update.json
             /tmp/update.err
+            /home/runner/.openclaw/update-reports
           if-no-files-found: warn

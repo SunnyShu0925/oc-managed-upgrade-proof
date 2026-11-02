@@ -112,9 +112,12 @@ try {
   process.exit(0);
 }
 const res = doc.result ?? doc;
+const steps = res.steps ?? [];
+const failed = steps.filter((s) => s.exitCode !== 0).length;
 console.log("status=", res.status, "reason=", res.reason);
 console.log("from=", res.before?.version, "to=", res.after?.version);
-for (const step of res.steps ?? []) {
+console.log(`run_status=${res.status} steps_total=${steps.length} steps_failed=${failed}`);
+for (const step of steps) {
   console.log(
     "STEP",
     step.name,
@@ -123,10 +126,31 @@ for (const step of res.steps ?? []) {
   );
 }
 ' 2>&1 | tee -a "$SUM"
+RUN_STATUS=$(grep -oE "^run_status=[a-z]+" "$SUM" | tail -1 | cut -d= -f2)
+STEPS_FAILED=$(grep -oE "steps_failed=[0-9]+" "$SUM" | tail -1 | cut -d= -f2)
+RUN_STATUS=${RUN_STATUS:-unparsable}
+STEPS_FAILED=${STEPS_FAILED:-unparsable}
 
-say "completion and admission lines from the shipped command"
-grep -hoE "OpenClaw updated to [^\"]*|Admission checks: [^\"]*|plugin inventory[^\"]*|ENOTDIR[^\"]*" \
-  /tmp/update.json /tmp/update.err 2>/dev/null | sort -u | head -12 | tee -a "$SUM"
+say "completion and admission text written by the shipped updater"
+# --json keeps the machine result on stdout; the human completion line, the admission
+# summary and the phase timings land in the run report the update writes into the store.
+REPORT=$(ls -t "$STATE"/update-reports/*.md 2>/dev/null | head -1)
+note "report=${REPORT#$HOME/}"
+grep -hE "OpenClaw updated to|Admission checks:|Phases:|Snapshot location:" "$REPORT" 2>/dev/null |
+  head -6 | tee -a "$SUM"
+node -e '
+const fs = require("node:fs");
+const raw = fs.readFileSync("/tmp/update.json", "utf8");
+try {
+  const doc = JSON.parse(raw.slice(raw.indexOf("{")));
+  const res = doc.result ?? doc;
+  const a = res.candidateAdmission ?? res.admission;
+  console.log("candidate_admission=", a ? `${a.verdict} reasons=${JSON.stringify(a.reasons)}` : "absent");
+} catch {
+  console.log("candidate_admission= unparsable");
+}
+' 2>&1 | tee -a "$SUM"
+grep -hoE "ENOTDIR[^\"]*" /tmp/update.json /tmp/update.err 2>/dev/null | sort -u | head -4 | tee -a "$SUM"
 
 say "operator store after the update"
 note "installed_after=$("$DRIVER_BIN" --version 2>&1 | grep -m1 "^OpenClaw")"
@@ -147,7 +171,8 @@ note "config_port_after=$(grep -o '"port": *[0-9]*' "$STATE/openclaw.json" 2>/de
 
 say "verdict"
 ENOTDIR_HITS=$( { cat /tmp/update.json /tmp/update.err; } 2>/dev/null | grep -c "ENOTDIR" || true)
-COMPLETED=$( { cat /tmp/update.json /tmp/update.err; } 2>/dev/null | grep -c "updated to" || true)
+REPORT_COMPLETED=$(grep -c "OpenClaw updated to" "$REPORT" 2>/dev/null || true)
+REPORT_COMPLETED=${REPORT_COMPLETED:-0}
 SNAPSHOT_EXIT=$(node -e '
 const fs = require("node:fs");
 try {
@@ -161,18 +186,20 @@ try {
 ')
 VERDICT=FAIL
 if [ "$CELL" = red ]; then
-  # The shipped candidate must abort on this link and name it.
-  if [ "$RC" -ne 0 ] && [ "$ENOTDIR_HITS" -gt 0 ] && [ "$COMPLETED" -eq 0 ]; then
+  # The published candidate must abort on this link and name it.
+  if [ "$RC" -ne 0 ] && [ "$ENOTDIR_HITS" -gt 0 ] && [ "$RUN_STATUS" != ok ] &&
+    [ "$REPORT_COMPLETED" = 0 ]; then
     VERDICT=PASS
   fi
-  note "red: exit=$RC enotdir=$ENOTDIR_HITS completed=$COMPLETED"
+  note "red: exit=$RC enotdir=$ENOTDIR_HITS run_status=$RUN_STATUS report_completed=$REPORT_COMPLETED"
 else
   # The reviewed candidate must carry the same store through every phase, data intact.
-  if [ "$RC" -eq 0 ] && [ "$COMPLETED" -gt 0 ] && [ "$ENOTDIR_HITS" -eq 0 ] &&
-    [ "$SNAPSHOT_EXIT" = 0 ] && [ -n "$(readlink "$PLUGIN_DIR/plugin-link" 2>/dev/null)" ]; then
+  if [ "$RC" -eq 0 ] && [ "$RUN_STATUS" = ok ] && [ "$STEPS_FAILED" = 0 ] &&
+    [ "$ENOTDIR_HITS" = 0 ] && [ "$SNAPSHOT_EXIT" = 0 ] && [ "$REPORT_COMPLETED" = 1 ] &&
+    [ -n "$(readlink "$PLUGIN_DIR/plugin-link" 2>/dev/null)" ]; then
     VERDICT=PASS
   fi
-  note "green: exit=$RC enotdir=$ENOTDIR_HITS completed=$COMPLETED snapshot_exit=$SNAPSHOT_EXIT"
+  note "green: exit=$RC enotdir=$ENOTDIR_HITS run_status=$RUN_STATUS steps_failed=$STEPS_FAILED snapshot_exit=$SNAPSHOT_EXIT report_completed=$REPORT_COMPLETED"
 fi
 note "VERDICT=$VERDICT cell=$CELL"
 [ "$VERDICT" = PASS ] || exit 1
