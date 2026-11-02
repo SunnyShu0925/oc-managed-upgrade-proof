@@ -52,8 +52,17 @@ jobs:
 
       - name: Build the CLI/dist from the reviewed head
         working-directory: openclaw
-        run: pnpm build:ci-artifacts
+        # The package profile emits the canonical dts entries that the
+        # --skip-build tarball integrity check insists on; ci-artifacts does not.
+        run: pnpm build:package
         continue-on-error: true
+
+      - name: Assert the built dist packages cleanly
+        working-directory: openclaw
+        run: |
+          set -euo pipefail
+          test -f dist/entry.js
+          test -f dist/runtime-artifacts.d.ts
 
       - name: Package the canonical candidate artifact
         working-directory: openclaw
@@ -62,8 +71,10 @@ jobs:
             --output-dir "$GITHUB_WORKSPACE/artifacts/pkg" --output-name openclaw-candidate.tgz
           ls -l "$GITHUB_WORKSPACE/artifacts/pkg"
           tar -xzOf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
-            package/dist/update-managed-service-handoff-current-*.mjs \
-            | grep -o 'scheduleAbsoluteDeadline(performance.now() + timeoutMs[^;]*' | head -1
+            package/dist/update-managed-service-handoff-*.mjs \
+            | grep -c 'createMonotonicBudget(params.recoveryTimeoutMs)' || true
+          tar -tzf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
+            | grep -c 'runtime-artifacts.d.ts' || true
 
       - name: Run the project's published-driver update cell
         working-directory: openclaw
