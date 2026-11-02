@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       arm:
-        description: "prefix (published 2026.10.8 driver) | head (built PR head driver)"
+        description: "prefix (published 2026.10.9 driver) | head (built PR head driver)"
         required: true
         default: prefix
       offset_ms:
@@ -177,7 +177,7 @@ jobs:
           NPM_PREFIX=$(npm prefix -g)
           echo "npm_prefix=$NPM_PREFIX" | tee -a "$GITHUB_ENV"
           if [ "${{ inputs.arm }}" = "prefix" ]; then
-            npm install -g openclaw@2026.10.8 --no-audit --no-fund
+            npm install -g openclaw@2026.10.9 --no-audit --no-fund
           elif [ -f "$GITHUB_WORKSPACE/artifacts/driver/openclaw-head.tgz" ]; then
             echo "driver_source=earlier-head-build"
             npm install -g "$GITHUB_WORKSPACE/artifacts/driver/openclaw-head.tgz" --no-audit --no-fund
