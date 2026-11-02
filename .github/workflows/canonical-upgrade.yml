@@ -70,11 +70,12 @@ jobs:
           node scripts/package-openclaw-for-docker.mjs --skip-build --allow-unreleased-changelog \
             --output-dir "$GITHUB_WORKSPACE/artifacts/pkg" --output-name openclaw-candidate.tgz
           ls -l "$GITHUB_WORKSPACE/artifacts/pkg"
-          tar -xzOf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
-            package/dist/update-managed-service-handoff-*.mjs \
-            | grep -c 'createMonotonicBudget(params.recoveryTimeoutMs)' || true
-          tar -tzf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
-            | grep -c 'runtime-artifacts.d.ts' || true
+          echo "head_dist_monotonic_budget=$(grep -r --include='update-managed-service-handoff*' -c 'createMonotonicBudget(params.recoveryTimeoutMs)' openclaw/dist 2>/dev/null | grep -v ':0$' | tr '\n' ' ')"
+          echo "served_dist_monotonic_budget=$(tar -xzOf --wildcards "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
+            'package/dist/update-managed-service-handoff-*.mjs' 2>/dev/null | grep -c 'createMonotonicBudget(params.recoveryTimeoutMs)')"
+          echo "served_wallclock_loop=$(tar -xzOf --wildcards "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" \
+            'package/dist/update-managed-service-handoff-*.mjs' 2>/dev/null | grep -c 'Date.now() < deadline')"
+          tar -tzf "$GITHUB_WORKSPACE/artifacts/pkg/openclaw-candidate.tgz" | grep -c runtime-artifacts.d.ts
 
       - name: Run the project's published-driver update cell
         working-directory: openclaw
