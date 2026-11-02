@@ -76,24 +76,42 @@ try {
 find "$STATE" -maxdepth 3 | sed "s#$HOME#~#" | sort | tee -a "$SUM"
 note "config_sha_before=$(sha256sum "$STATE/openclaw.json" | cut -d' ' -f1)"
 
-say "operator store the update reads: config and plugin index"
-node -e '
+cat >/tmp/dump-plugin-index.cjs <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
-const state = path.join(process.env.HOME, ".openclaw");
-console.log("openclaw.json =", fs.readFileSync(path.join(state, "openclaw.json"), "utf8").trim());
 const { DatabaseSync } = require("node:sqlite");
-const db = new DatabaseSync(path.join(state, "state", "openclaw.sqlite"), { readOnly: true });
-for (const row of db
-  .prepare("select state_key, substr(value_json,1,700) v from config_machine_state")
-  .all()) {
-  console.log("machine_state key=", row.state_key);
-  console.log(row.v);
+const dbPath = path.join(process.env.HOME, ".openclaw", "state", "openclaw.sqlite");
+if (!fs.existsSync(dbPath)) {
+  console.log("no state database at", dbPath);
+  process.exit(0);
+}
+const db = new DatabaseSync(dbPath, { readOnly: true });
+const tables = db
+  .prepare("select name from sqlite_master where type = 'table'")
+  .all()
+  .map((row) => row.name);
+console.log("tables=", tables.join(","));
+if (tables.includes("config_machine_state")) {
+  for (const row of db
+    .prepare("select state_key, substr(value_json, 1, 1200) as v from config_machine_state")
+    .all()) {
+    console.log("machine_state key=", row.state_key);
+    console.log(row.v);
+  }
 }
 db.close();
-' 2>&1 | tee -a "$SUM" | head -40
+NODE
+
+say "operator store the update reads: config and plugin index"
+cat "$STATE/openclaw.json" | tee -a "$SUM"
+node /tmp/dump-plugin-index.cjs 2>&1 | tee -a "$SUM" | head -40
 
 say "drive the shipped update entry: openclaw update --tag $TARGET_VERSION --no-restart --yes"
+if [ "${TRACE_REALPATH:-}" = "1" ]; then
+  here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  export NODE_OPTIONS="--import $here/trace-plugin-link-realpath.mjs ${NODE_OPTIONS:-}"
+  note "node_options=$NODE_OPTIONS"
+fi
 START=$(date +%s)
 RC=0
 "$DRIVER_BIN" update --tag "$TARGET_VERSION" --no-restart --yes --json --timeout 1500 \
@@ -132,6 +150,12 @@ console.log("phases=", (run.phases ?? run.steps ?? []).map?.((s) => `${s.name ??
 ' 2>&1 | head -12
 echo "--- full human-readable tail ---"
 { cat /tmp/update.err; tail -40 /tmp/update.json; } | grep -vE '^\s*$' | tail -25 | tee -a "$SUM"
+
+say "operator store after the run: plugin index the inventory read"
+node /tmp/dump-plugin-index.cjs 2>&1 | tee -a "$SUM" | head -60
+
+say "shipped realpath call sites on the proof link"
+grep -A12 "realpath-trace" /tmp/update.err | head -80
 
 say "verdict"
 ENOTDIR_HITS=$( { cat /tmp/update.err /tmp/update.json; } 2>/dev/null | grep -c "ENOTDIR" || true)

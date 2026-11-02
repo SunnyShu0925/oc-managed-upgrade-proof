@@ -23,6 +23,10 @@ on:
         description: "optional: reuse the packaged head build from this earlier run"
         required: false
         default: ""
+      trace_realpath:
+        description: "diagnostics only: set 1 to trace every shipped realpath call on the proof link"
+        required: false
+        default: "0"
 
 permissions:
   contents: read
@@ -36,6 +40,7 @@ jobs:
       PUBLISHED_DRIVER: ${{ inputs.published_driver }}
       TARGET_VERSION: ${{ inputs.target_version }}
       PORT_GATEWAY: "19031"
+      TRACE_REALPATH: ${{ inputs.trace_realpath }}
     steps:
       - name: Checkout proof harness
         uses: actions/checkout@v4
