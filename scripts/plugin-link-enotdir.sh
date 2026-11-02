@@ -151,7 +151,8 @@ console.log("phases=", (run.phases ?? run.steps ?? []).map?.((s) => `${s.name ??
 echo "--- full human-readable tail ---"
 { cat /tmp/update.err; tail -40 /tmp/update.json; } | grep -vE '^\s*$' | tail -25 | tee -a "$SUM"
 
-say "operator store after the run: plugin index the inventory read"
+say "operator store after the run: config and plugin index the inventory read"
+cat "$STATE/openclaw.json" 2>/dev/null | tee -a "$SUM"
 node /tmp/dump-plugin-index.cjs 2>&1 | tee -a "$SUM" | head -60
 
 say "shipped realpath call sites on the proof link"
