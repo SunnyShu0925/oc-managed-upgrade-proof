@@ -130,6 +130,19 @@ jobs:
           echo
           echo "=== state dir after the run ==="
           find "$HOME/.openclaw" -maxdepth 4 -name "*plugin-link*" -o -maxdepth 4 -name "blocker" | sort
+          echo
+          echo "=== leftover snapshot trees ==="
+          find "$HOME/.openclaw" -maxdepth 2 -name "*snapshot*" -o -maxdepth 2 -name ".openclaw-*" | sort
+          ls -la "$HOME/.openclaw" | sed -n '1,30p'
+          echo
+          echo "=== support bundle ==="
+          find "$HOME/.openclaw/logs/support" -type f | sort
+          for f in "$HOME"/.openclaw/logs/support/openclaw-update-failure-*.json; do
+            [ -f "$f" ] || continue
+            echo "--- $f ---"
+            head -c 6000 "$f"
+            echo
+          done
 
       - name: Upload proof artifacts
         if: always()
@@ -140,4 +153,5 @@ jobs:
             /tmp/proof-summary.txt
             /tmp/update.json
             /tmp/update.err
+            /home/runner/.openclaw/logs/support
           if-no-files-found: warn

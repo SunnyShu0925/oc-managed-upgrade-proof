@@ -37,7 +37,7 @@ for fn in ignoreUnresolvedPluginLink targetIdentity; do
     note "guard_$fn=NOT_FOUND in installed dist"
     continue
   fi
-  body=$(grep -A4 "function $fn(" "$file" | tr -s '\t ' ' ')
+  body=$(grep -A14 "function $fn(" "$file" | tr -s '\t ' ' ')
   note "guard_$fn file=$(basename "$file")"
   echo "$body" | tee -a "$SUM"
   note "guard_$fn accepts_ENOTDIR=$(echo "$body" | grep -c ENOTDIR)"
@@ -76,12 +76,47 @@ try {
 find "$STATE" -maxdepth 3 | sed "s#$HOME#~#" | sort | tee -a "$SUM"
 note "config_sha_before=$(sha256sum "$STATE/openclaw.json" | cut -d' ' -f1)"
 
+say "operator store the update reads: config and plugin index"
+node -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const state = path.join(process.env.HOME, ".openclaw");
+console.log("openclaw.json =", fs.readFileSync(path.join(state, "openclaw.json"), "utf8").trim());
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync(path.join(state, "state", "openclaw.sqlite"), { readOnly: true });
+for (const row of db
+  .prepare("select state_key, substr(value_json,1,700) v from config_machine_state")
+  .all()) {
+  console.log("machine_state key=", row.state_key);
+  console.log(row.v);
+}
+db.close();
+' 2>&1 | tee -a "$SUM" | head -40
+
 say "drive the shipped update entry: openclaw update --tag $TARGET_VERSION --no-restart --yes"
 START=$(date +%s)
 RC=0
 "$DRIVER_BIN" update --tag "$TARGET_VERSION" --no-restart --yes --json --timeout 1500 \
   >/tmp/update.json 2>/tmp/update.err || RC=$?
 note "update_exit=$RC elapsed_s=$(( $(date +%s) - START ))"
+say "failure diagnostics written by the shipped update"
+for f in "$STATE"/logs/support/openclaw-update-failure-*.json; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"
+  node -e '
+const fs = require("node:fs");
+const body = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const walk = (value, key) => {
+  if (typeof value === "string" && /at .*\.mjs|stack|realpath|ENOTDIR/i.test(key + " " + value)) {
+    console.log(key + " => " + value.slice(0, 1200));
+  }
+  if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) walk(v, k);
+  }
+};
+walk(body, "root");
+  ' "$f" 2>&1 | head -40
+done
 echo "--- update stderr (guard-relevant lines) ---"
 grep -nE "ENOTDIR|ELOOP|ENOENT|plugin-link|Failed:|Phase:" /tmp/update.err | head -20
 echo "--- update stdout summary ---"
